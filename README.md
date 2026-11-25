@@ -2,7 +2,7 @@
 ![make.fun rank](https://make.fun/badge/news-image-20261125/ovokai/news-in-one-image-20251125/rank.svg)
 ![make.fun reward](https://make.fun/badge/news-image-20261125/ovokai/news-in-one-image-20251125/reward.svg)
 
-Competition page: https://make.fun/bounty/news-image-20261125
+[Competition page on make.fun](https://make.fun/bounty/news-image-20261125)
 
 # The World in One Image — Wednesday 25 November 2026
 
