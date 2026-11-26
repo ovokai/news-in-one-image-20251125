@@ -395,22 +395,71 @@ def icon_space(cv, x, y, s):
                FLAME_O)
 
 
+def icon_refinery(cv, x, y, s):
+    # two storage tanks + a distillation tower with a flare
+    cv.fill_rect(x + s * 0.06, y + s * 0.48, x + s * 0.36, y + s * 0.96, INK)
+    cv.ellipse(x + s * 0.06, y + s * 0.38, x + s * 0.36, y + s * 0.56, INK)
+    cv.fill_rect(x + s * 0.42, y + s * 0.60, x + s * 0.64, y + s * 0.96, INK)
+    cv.ellipse(x + s * 0.42, y + s * 0.51, x + s * 0.64, y + s * 0.68, INK)
+    cv.fill_rect(x + s * 0.76, y + s * 0.26, x + s * 0.86, y + s * 0.96, INK)
+    cv.line(x + s * 0.70, y + s * 0.44, x + s * 0.92, y + s * 0.44, INK, 4)
+    cv.line(x + s * 0.70, y + s * 0.62, x + s * 0.92, y + s * 0.62, INK, 4)
+    fx, fy = x + s * 0.81, y + s * 0.26
+    cv.polygon([(fx - s * 0.08, fy), (fx, fy - s * 0.20), (fx + s * 0.08, fy)], RED)
+    cv.polygon([(fx - s * 0.04, fy), (fx, fy - s * 0.11), (fx + s * 0.04, fy)], FLAME_Y)
+
+
+def icon_missile(cv, x, y, s):
+    # diagonal missile climbing to the upper right, flame at the tail
+    cv.polygon([(x + s * 0.30, y + s * 0.70), (x + s * 0.62, y + s * 0.14),
+                (x + s * 0.72, y + s * 0.10), (x + s * 0.86, y + s * 0.24),
+                (x + s * 0.82, y + s * 0.34), (x + s * 0.40, y + s * 0.80)], INK)
+    cv.polygon([(x + s * 0.30, y + s * 0.70), (x + s * 0.14, y + s * 0.88),
+                (x + s * 0.40, y + s * 0.80)], RED)
+    cv.polygon([(x + s * 0.62, y + s * 0.58), (x + s * 0.86, y + s * 0.62),
+                (x + s * 0.40, y + s * 0.80)], RED)
+    cv.polygon([(x + s * 0.14, y + s * 0.92), (x + s * 0.28, y + s * 0.72),
+                (x + s * 0.36, y + s * 0.86)], FLAME_O)
+    cv.polygon([(x + s * 0.20, y + s * 0.90), (x + s * 0.29, y + s * 0.76),
+                (x + s * 0.33, y + s * 0.86)], FLAME_Y)
+
+
+def icon_cross(cv, x, y, s):
+    # simple latin cross (Vatican / Pope)
+    cx = x + s * 0.5
+    cv.fill_rect(cx - s * 0.09, y + s * 0.06, cx + s * 0.09, y + s * 0.94, INK)
+    cv.fill_rect(cx - s * 0.32, y + s * 0.28, cx + s * 0.32, y + s * 0.45, INK)
+    cv.fill_rect(x + s * 0.22, y + s * 0.94, x + s * 0.78, y + s * 0.99, RED)
+
+
 ICONS = {
     "RIYADH": icon_riyadh,
-    "MARKETS": icon_markets,
+    "RAS TANURA": icon_refinery,
+    "SEOUL": icon_markets,
+    "TOKYO": icon_markets,
+    "WALL ST": icon_markets,
+    "NVIDIA": icon_huawei,
     "UKRAINE": icon_ukraine,
+    "KYIV": icon_missile,
     "HUAWEI": icon_huawei,
     "CLIMATE": icon_climate,
+    "VATICAN": icon_cross,
     "SPACE": icon_space,
 }
 
 PANELS = [
-    ("RIYADH", "Houthi strike hits tower and oil refinery; 11 injured"),
-    ("MARKETS", "Asia stocks plunge: KOSPI \u22126.2%, Nikkei \u22122.8%; Dow tops 50,000"),
-    ("UKRAINE", "Drones strike Rosneft refineries; Kyiv and Odesa hit"),
+    ("RIYADH", "Houthi strike hits Riyadh tower; 11 injured"),
+    ("RAS TANURA", "Oil refinery hit in Houthi strike"),
+    ("SEOUL", "KOSPI plunges \u22126.2% as Asia stocks tumble"),
+    ("TOKYO", "Nikkei falls \u22122.8% in regional sell-off"),
+    ("WALL ST", "Dow closes above 50,000 for the first time"),
+    ("NVIDIA", "Nvidia shares fall \u22125.9% after +31.5% surge"),
+    ("UKRAINE", "Drones strike Rosneft refineries in Samara"),
+    ("KYIV", "Kyiv and Odesa hit by strikes"),
     ("HUAWEI", "US jury convicts Huawei of bank fraud, trade-secret theft"),
-    ("CLIMATE", "COP31 ends without a deal; Pope warns on extreme weather"),
-    ("SPACE", "Shenzhou-24 docks with Tiangong space station"),
+    ("CLIMATE", "COP31 ends without a deal"),
+    ("VATICAN", "Pope warns on extreme weather"),
+    ("SPACE", "Shenzhou-24 docks with Tiangong station"),
 ]
 
 
@@ -458,20 +507,21 @@ def tanker(cv, x, y, scale, hull_col, burning):
 
 
 def draw_headline_scene(cv):
-    x0, y0, x1, y1 = 36, 208, 988, 428
+    x0, y0, x1, y1 = 36, 206, 988, 356
     # sky: two flat bands (deterministic gradient feel)
-    cv.fill_rect(x0, y0, x1, 350, SKY_BOT)
-    cv.fill_rect(x0, y0, x1, 282, SKY_TOP)
+    cv.fill_rect(x0, y0, x1, 308, SKY_BOT)
+    cv.fill_rect(x0, y0, x1, 272, SKY_TOP)
     # sea
-    cv.fill_rect(x0, 350, x1, y1, SEA)
-    cv.fill_rect(x0, 350, x1, 358, SEA_DARK)
-    for i, wy in enumerate((374, 394, 412)):
+    cv.fill_rect(x0, 308, x1, y1, SEA)
+    cv.fill_rect(x0, 308, x1, 314, SEA_DARK)
+    for i, wy in enumerate((324, 340)):
         off = 60 if i % 2 else 0
         for wx in range(x0 + 40 + off, x1 - 60, 170):
             cv.line(wx, wy, wx + 52, wy, WAVE, 3)
-    # burning tanker (hero, left-centre) and intact tanker (right)
-    tanker(cv, 120, 392, 0.92, SHIP, burning=True)
-    tanker(cv, 618, 386, 0.66, SHIP2, burning=False)
+    # burning tanker (hero, left) and intact tanker (right); scales are
+    # small enough that the smoke plume stays inside the scene box.
+    tanker(cv, 110, 342, 0.55, SHIP, burning=True)
+    tanker(cv, 640, 336, 0.48, SHIP2, burning=False)
     cv.rect_outline(x0, y0, x1, y1, BORDER, 3)
 
 
@@ -481,23 +531,23 @@ def draw_headline_scene(cv):
 def draw_panel(cv, x, y, w, h, region, title):
     cv.fill_rect(x, y, x + w, y + h, PANEL_BG)
     cv.rect_outline(x, y, x + w, y + h, BORDER, 2)
-    cv.fill_rect(x, y, x + 6, y + h, RED)
-    pad = 16
-    icon_s = 48
-    ICONS[region](cv, x + pad + 4, y + 12, icon_s)
-    draw_text(cv, x + pad + icon_s + 18, y + 22, region, "lb", 28, RED)
-    # Title: start at 30px; shrink only as far as needed so the full
-    # title fits the panel (no clipped words).
-    size = 30
-    while size > 20:
-        lines = wrap_text(title, "lb", size, w - pad * 2 - 6)
+    cv.fill_rect(x, y, x + 5, y + h, RED)
+    pad = 12
+    icon_s = 34
+    ICONS[region](cv, x + pad + 2, y + 9, icon_s)
+    draw_text(cv, x + pad + icon_s + 10, y + 15, region, "lb", 21, RED)
+    # Title: start at 22px; shrink only as far as needed so the full
+    # title fits the panel (no clipped words), never below 19px.
+    size = 22
+    while size > 19:
+        lines = wrap_text(title, "lb", size, w - pad * 2 - 4)
         if len(lines) <= 4:
             break
         size -= 1
-    ty = y + 62
+    ty = y + 52
     for ln in lines[:4]:
-        draw_text(cv, x + pad + 4, ty, ln, "lb", size, INK)
-        ty += size + 5
+        draw_text(cv, x + pad + 2, ty, ln, "lb", size, INK)
+        ty += size + 4
 
 
 # ---------------------------------------------------------------------------
@@ -516,36 +566,35 @@ def build():
 
     # ---- Headline scene + caption --------------------------------------
     draw_headline_scene(cv)
-    cap_y = 436
-    cv.fill_rect(36, cap_y, 44, 518, RED)
+    cap_y = 364
+    cv.fill_rect(36, cap_y, 44, cap_y + 72, RED)
     draw_text(cv, 60, cap_y + 2, "STRAIT OF HORMUZ", "db", 44, INK)
-    draw_text(cv, 60, cap_y + 54,
+    draw_text(cv, 60, cap_y + 52,
               "Two oil tankers hit naval mines and burst into flames",
-              "lr", 28, INK)
+              "lb", 23, INK)
 
-    # ---- Six panels ------------------------------------------------------
-    panel_w, panel_h, gap = 309, 200, 10
-    top = 528
+    # ---- Twelve panels ---------------------------------------------------
+    panel_w, panel_h, gap = 232, 162, 8
+    top = 442
     for i, (region, title) in enumerate(PANELS):
-        col, row = i % 3, i // 3
+        col, row = i % 4, i // 4
         px = 36 + col * (panel_w + gap)
         py = top + row * (panel_h + gap)
         draw_panel(cv, px, py, panel_w, panel_h, region, title)
 
     # ---- Bottom banner ---------------------------------------------------
-    by0, by1 = 948, 1002
+    by0, by1 = 954, 1010
     cv.fill_rect(36, by0, 988, by1, RED)
     banner_lines = [
-        "ALSO TODAY: Gaza strike kills Hamas security chief \u2022 "
-        "Dell posts record AI-server sales",
+        "ALSO TODAY: Gaza strike kills Hamas security chief",
         "Colombia frees supermarket hostages \u2022 "
-        "Shenzhou-24 crew arrives at Tiangong",
+        "Dell posts record AI-server sales",
     ]
-    size = 23
+    size = 20
     while size > 12 and any(text_width("lb", size, s) > 936 for s in banner_lines):
         size -= 1
-    draw_centered(cv, cx, by0 + 4, banner_lines[0], "lb", size, WHITE)
-    draw_centered(cv, cx, by0 + 29, banner_lines[1], "lb", size, WHITE)
+    draw_centered(cv, cx, by0 + 5, banner_lines[0], "lb", size, WHITE)
+    draw_centered(cv, cx, by0 + 30, banner_lines[1], "lb", size, WHITE)
 
     return cv
 
