@@ -3,25 +3,31 @@
 
 A deterministic program that draws a newspaper-front-page style infographic
 summarising the world news of Wednesday 25 November 2026, and writes it to
-/output/entry.png (1024x1024 PNG).
+entry.png inside the output directory (1024x1024 PNG).
 
-No randomness, no clock, no network: every run produces byte-identical
-output. All artwork is drawn with PIL primitives (rectangles, ellipses,
-polygons, lines); all text uses system DejaVu / Liberation fonts.
+Dependency-free edition: this program uses only the Python standard library,
+so it runs in a bare sandbox with no Pillow, no system fonts, no network and
+a read-only working directory. All artwork is rasterised by hand into a
+frame buffer (rectangles, ellipses, polygons, lines); all text is blitted
+from glyph alpha bitmaps embedded in glyphs.py (rendered once, locally,
+from DejaVu Sans Bold / Liberation Sans with PIL). PNG encoding is done
+with zlib + struct. No randomness, no clock, no network: every run
+produces byte-identical output.
 """
 
+import base64
 import os
+import struct
+import zlib
+from math import sqrt
 
-from PIL import Image, ImageDraw, ImageFont
-
-# --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Canvas and palette
-# --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 W = H = 1024
 BG = (247, 243, 234)          # warm paper white
 INK = (26, 26, 26)            # near-black ink
 RED = (179, 32, 42)           # accent red
-DARK_RED = (140, 22, 32)
 SEA = (43, 74, 94)            # slate sea
 SEA_DARK = (33, 58, 74)
 SKY_TOP = (203, 216, 220)
@@ -34,64 +40,272 @@ SMOKE1 = (105, 109, 112)
 SMOKE2 = (154, 158, 160)
 PANEL_BG = (255, 253, 247)
 BORDER = (26, 26, 26)
-
-OUT_PATH = "/output/entry.png"
-
-FONT_DIR_DEJAVU = "/usr/share/fonts/truetype/dejavu"
-FONT_DIR_LIB = "/usr/share/fonts/truetype/liberation"
+WAVE = (86, 122, 140)
+WHITE = (255, 255, 255)
 
 
-def font(path_candidates, size):
-    for p in path_candidates:
-        if os.path.exists(p):
-            return ImageFont.truetype(p, size)
-    raise FileNotFoundError(path_candidates)
+# ---------------------------------------------------------------------------
+# PNG writer (stdlib only)
+# ---------------------------------------------------------------------------
+def _chunk(tag, payload):
+    return (struct.pack(">I", len(payload)) + tag + payload
+            + struct.pack(">I", zlib.crc32(tag + payload) & 0xFFFFFFFF))
 
 
-def dejavu_bold(size):
-    return font([os.path.join(FONT_DIR_DEJAVU, "DejaVuSans-Bold.ttf"),
-                 os.path.join(FONT_DIR_LIB, "LiberationSans-Bold.ttf")], size)
+def write_png(path, width, height, buf):
+    """buf is a bytearray of width*height RGB triples, row-major."""
+    raw = bytearray()
+    stride = width * 3
+    for y in range(height):
+        raw.append(0)  # filter type 0 (None) for every scanline
+        raw += buf[y * stride:(y + 1) * stride]
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    png = (b"\x89PNG\r\n\x1a\n"
+           + _chunk(b"IHDR", ihdr)
+           + _chunk(b"IDAT", zlib.compress(bytes(raw), 6))
+           + _chunk(b"IEND", b""))
+    with open(path, "wb") as f:
+        f.write(png)
 
 
-def lib_bold(size):
-    return font([os.path.join(FONT_DIR_LIB, "LiberationSans-Bold.ttf"),
-                 os.path.join(FONT_DIR_DEJAVU, "DejaVuSans-Bold.ttf")], size)
+# ---------------------------------------------------------------------------
+# Frame buffer with hand-rolled rasterisation.
+# All coordinates follow PIL conventions: rectangles and ellipse bounding
+# boxes are inclusive of both corners.
+# ---------------------------------------------------------------------------
+class Canvas:
+    def __init__(self, w, h, bg):
+        self.w = w
+        self.h = h
+        self.buf = bytearray(bytes(bg) * (w * h))
+
+    def fill_rect(self, x0, y0, x1, y1, col):
+        x0 = max(0, int(round(x0)))
+        y0 = max(0, int(round(y0)))
+        x1 = min(self.w - 1, int(round(x1)))
+        y1 = min(self.h - 1, int(round(y1)))
+        if x1 < x0 or y1 < y0:
+            return
+        row = bytes(col) * (x1 - x0 + 1)
+        n = len(row)
+        stride = self.w * 3
+        for y in range(y0, y1 + 1):
+            i = y * stride + x0 * 3
+            self.buf[i:i + n] = row
+
+    def rect_outline(self, x0, y0, x1, y1, col, width):
+        self.fill_rect(x0, y0, x1, y0 + width - 1, col)
+        self.fill_rect(x0, y1 - width + 1, x1, y1, col)
+        self.fill_rect(x0, y0, x0 + width - 1, y1, col)
+        self.fill_rect(x1 - width + 1, y0, x1, y1, col)
+
+    def ellipse(self, x0, y0, x1, y1, col):
+        cx = (x0 + x1) / 2.0
+        cy = (y0 + y1) / 2.0
+        rx = (x1 - x0) / 2.0
+        ry = (y1 - y0) / 2.0
+        if rx <= 0 or ry <= 0:
+            self.fill_rect(x0, y0, x1, y1, col)
+            return
+        stride = self.w * 3
+        row_bytes = bytes(col)
+        for y in range(int(y0), int(y1) + 1):
+            if y < 0 or y >= self.h:
+                continue
+            t = (y - cy) / ry
+            t2 = t * t
+            if t2 > 1.0:
+                continue
+            dx = rx * sqrt(1.0 - t2)
+            xa = max(0, int(round(cx - dx)))
+            xb = min(self.w - 1, int(round(cx + dx)))
+            if xb < xa:
+                continue
+            i = y * stride + xa * 3
+            self.buf[i:i + (xb - xa + 1) * 3] = row_bytes * (xb - xa + 1)
+
+    def ellipse_outline(self, x0, y0, x1, y1, col, width, inner):
+        self.ellipse(x0, y0, x1, y1, col)
+        self.ellipse(x0 + width, y0 + width, x1 - width, y1 - width, inner)
+
+    def polygon(self, pts, col):
+        pts = [(float(px), float(py)) for px, py in pts]
+        ys = [p[1] for p in pts]
+        y_lo = max(0, int(min(ys)))
+        y_hi = min(self.h - 1, int(max(ys)))
+        n = len(pts)
+        stride = self.w * 3
+        row_bytes = bytes(col)
+        for y in range(y_lo, y_hi + 1):
+            yc = y + 0.5
+            xs = []
+            for i in range(n):
+                xa, ya = pts[i]
+                xb, yb = pts[(i + 1) % n]
+                if ya == yb:
+                    continue
+                if (ya <= yc < yb) or (yb <= yc < ya):
+                    xs.append(xa + (yc - ya) * (xb - xa) / (yb - ya))
+            xs.sort()
+            for k in range(0, len(xs) - 1, 2):
+                xa = max(0, int(round(xs[k])))
+                xb = min(self.w - 1, int(round(xs[k + 1])))
+                if xb < xa:
+                    continue
+                i = y * stride + xa * 3
+                self.buf[i:i + (xb - xa + 1) * 3] = row_bytes * (xb - xa + 1)
+
+    def line(self, x0, y0, x1, y1, col, width=1):
+        if y0 == y1 and width > 1:
+            self.fill_rect(min(x0, x1), y0 - width // 2,
+                           max(x0, x1), y0 + (width - 1) // 2, col)
+            return
+        if x0 == x1 and width > 1:
+            self.fill_rect(x0 - width // 2, min(y0, y1),
+                           x0 + (width - 1) // 2, max(y0, y1), col)
+            return
+        dist = sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2)
+        steps = max(1, int(dist * 2))
+        r = width / 2.0
+        for i in range(steps + 1):
+            t = i / steps
+            x = x0 + (x1 - x0) * t
+            y = y0 + (y1 - y0) * t
+            self.ellipse(x - r, y - r, x + r, y + r, col)
+
+    def polyline(self, pts, col, width):
+        for i in range(len(pts) - 1):
+            self.line(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1],
+                      col, width)
+        r = width / 2.0
+        for px, py in pts:
+            self.ellipse(px - r, py - r, px + r, py + r, col)
+
+    def rounded_rect(self, x0, y0, x1, y1, r, col):
+        # Middle band and side bands are plain rects; corners are quarter
+        # discs swept row by row.
+        self.fill_rect(x0 + r, y0, x1 - r, y1, col)
+        self.fill_rect(x0, y0 + r, x0 + r, y1 - r, col)
+        self.fill_rect(x1 - r, y0 + r, x1, y1 - r, col)
+        for (ccx, ccy) in [(x0 + r, y0 + r), (x1 - r, y0 + r),
+                           (x0 + r, y1 - r), (x1 - r, y1 - r)]:
+            self.ellipse(ccx - r, ccy - r, ccx + r, ccy + r, col)
+        # The four disc stamps overshoot into the middle; repaint order is
+        # fine because every stamp uses the same colour.
+
+    def rounded_rect_outline(self, x0, y0, x1, y1, r, col, width, inner):
+        self.rounded_rect(x0, y0, x1, y1, r, col)
+        self.rounded_rect(x0 + width, y0 + width, x1 - width, y1 - width,
+                          max(0, r - width), inner)
 
 
-def lib_regular(size):
-    return font([os.path.join(FONT_DIR_LIB, "LiberationSans-Regular.ttf"),
-                 os.path.join(FONT_DIR_DEJAVU, "DejaVuSans.ttf")], size)
+# ---------------------------------------------------------------------------
+# Embedded glyphs: alpha bitmaps rendered locally with PIL from DejaVu Sans
+# Bold ("db"), Liberation Sans Bold ("lb") and Liberation Sans Regular
+# ("lr"), stored in glyphs.py next to this file. Loaded by path (not by
+# import) so the program works even when its directory is not on sys.path.
+# Each glyph record: [advance, offset_x, offset_y, width, height, bitmap]
+# where the bitmap is base85(zlib(raw alpha bytes)) and the offsets place
+# the bitmap relative to the text draw point, exactly as PIL drew it.
+# ---------------------------------------------------------------------------
+def _load_glyph_table():
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(here, "glyphs.py")
+    ns = {}
+    with open(path, "rb") as f:
+        exec(compile(f.read(), "glyphs.py", "exec"), ns)
+    return ns["GLYPHS"]
 
 
-# --------------------------------------------------------------------------
-# Text helpers
-# --------------------------------------------------------------------------
-def text_w(draw, s, fnt):
-    return draw.textlength(s, font=fnt)
+GLYPHS = _load_glyph_table()
+_bitmap_cache = {}
 
 
-def draw_centered(draw, cx, y, s, fnt, fill):
-    w = text_w(draw, s, fnt)
-    draw.text((cx - w / 2, y), s, font=fnt, fill=fill)
+def _glyph(font_key, size, ch):
+    """Return (advance, ox, oy, w, h, alpha_bytes_or_None) for one glyph."""
+    rec = GLYPHS[font_key][size][ch]
+    adv, ox, oy, w, h, packed = rec
+    if not packed:
+        return adv, ox, oy, w, h, None
+    key = (font_key, size, ch)
+    data = _bitmap_cache.get(key)
+    if data is None:
+        data = zlib.decompress(base64.b85decode(packed.encode("ascii")))
+        _bitmap_cache[key] = data
+    return adv, ox, oy, w, h, data
 
 
-def draw_spaced_centered(draw, cx, y, s, fnt, fill, tracking):
+def text_width(font_key, size, s):
+    table = GLYPHS[font_key][size]
+    return sum(table[ch][0] for ch in s)
+
+
+def _blit_glyph(cv, gx, gy, w, h, data, col):
+    """Alpha-blend one glyph bitmap into the frame buffer at (gx, gy)."""
+    buf = cv.buf
+    width = cv.w
+    height = cv.h
+    r, g, b = col
+    for row in range(h):
+        yy = gy + row
+        if yy < 0 or yy >= height:
+            continue
+        src = data[row * w:(row + 1) * w]
+        if not src.strip(b"\x00"):
+            continue
+        base = yy * width * 3
+        for i in range(w):
+            a = src[i]
+            if a:
+                xx = gx + i
+                if 0 <= xx < width:
+                    idx = base + xx * 3
+                    if a == 255:
+                        buf[idx] = r
+                        buf[idx + 1] = g
+                        buf[idx + 2] = b
+                    else:
+                        ia = 255 - a
+                        buf[idx] = (r * a + buf[idx] * ia) // 255
+                        buf[idx + 1] = (g * a + buf[idx + 1] * ia) // 255
+                        buf[idx + 2] = (b * a + buf[idx + 2] * ia) // 255
+
+
+def draw_text(cv, x, y, s, font_key, size, col):
+    """Draw text with the draw point at (x, y), PIL-style (left, ascender)."""
+    cx = float(x)
+    yi = int(round(y))
+    for ch in s:
+        adv, ox, oy, w, h, data = _glyph(font_key, size, ch)
+        if data is not None:
+            _blit_glyph(cv, int(round(cx)) + ox, yi + oy, w, h, data, col)
+        cx += adv
+    return cx
+
+
+def draw_centered(cv, cx, y, s, font_key, size, col):
+    w = text_width(font_key, size, s)
+    draw_text(cv, cx - w / 2.0, y, s, font_key, size, col)
+
+
+def draw_spaced_centered(cv, cx, y, s, font_key, size, col, tracking):
     """Draw text with manual letter tracking, centred on cx."""
-    widths = [text_w(draw, ch, fnt) for ch in s]
+    table = GLYPHS[font_key][size]
+    widths = [table[ch][0] for ch in s]
     total = sum(widths) + tracking * (len(s) - 1)
-    x = cx - total / 2
+    x = cx - total / 2.0
     for ch, wch in zip(s, widths):
-        draw.text((x, y), ch, font=fnt, fill=fill)
+        draw_text(cv, x, y, ch, font_key, size, col)
         x += wch + tracking
 
 
-def wrap(draw, s, fnt, max_w):
-    """Greedy word wrap by measured pixel width. Fully deterministic."""
+def wrap_text(s, font_key, size, max_w):
+    """Greedy word wrap by summed glyph advances. Fully deterministic."""
     words = s.split(" ")
     lines, cur = [], ""
     for word in words:
         trial = word if not cur else cur + " " + word
-        if text_w(draw, trial, fnt) <= max_w or not cur:
+        if text_width(font_key, size, trial) <= max_w or not cur:
             cur = trial
         else:
             lines.append(cur)
@@ -101,82 +315,84 @@ def wrap(draw, s, fnt, max_w):
     return lines
 
 
-# --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Icons (simple silhouettes in a box at x, y of size s)
-# --------------------------------------------------------------------------
-def icon_riyadh(d, x, y, s):
+# ---------------------------------------------------------------------------
+def icon_riyadh(cv, x, y, s):
     # tall tower + side building + flame on top
-    d.rectangle([x + s * 0.34, y + s * 0.28, x + s * 0.62, y + s * 0.98], fill=INK)
-    d.rectangle([x + s * 0.66, y + s * 0.55, x + s * 0.94, y + s * 0.98], fill=INK)
-    d.rectangle([x + s * 0.06, y + s * 0.70, x + s * 0.30, y + s * 0.98], fill=INK)
+    cv.fill_rect(x + s * 0.34, y + s * 0.28, x + s * 0.62, y + s * 0.98, INK)
+    cv.fill_rect(x + s * 0.66, y + s * 0.55, x + s * 0.94, y + s * 0.98, INK)
+    cv.fill_rect(x + s * 0.06, y + s * 0.70, x + s * 0.30, y + s * 0.98, INK)
     fx, fy = x + s * 0.48, y + s * 0.30
-    d.polygon([(fx - s * 0.13, fy), (fx, fy - s * 0.30), (fx + s * 0.13, fy)], fill=RED)
-    d.polygon([(fx - s * 0.07, fy), (fx, fy - s * 0.17), (fx + s * 0.07, fy)], fill=FLAME_Y)
+    cv.polygon([(fx - s * 0.13, fy), (fx, fy - s * 0.30), (fx + s * 0.13, fy)], RED)
+    cv.polygon([(fx - s * 0.07, fy), (fx, fy - s * 0.17), (fx + s * 0.07, fy)], FLAME_Y)
 
 
-def icon_markets(d, x, y, s):
+def icon_markets(cv, x, y, s):
     # axes + plunging red line with arrowhead
-    d.line([x + s * 0.10, y + s * 0.08, x + s * 0.10, y + s * 0.90], fill=INK, width=4)
-    d.line([x + s * 0.10, y + s * 0.90, x + s * 0.95, y + s * 0.90], fill=INK, width=4)
+    cv.line(x + s * 0.10, y + s * 0.08, x + s * 0.10, y + s * 0.90, INK, 4)
+    cv.line(x + s * 0.10, y + s * 0.90, x + s * 0.95, y + s * 0.90, INK, 4)
     pts = [(x + s * 0.16, y + s * 0.22), (x + s * 0.38, y + s * 0.36),
            (x + s * 0.54, y + s * 0.30), (x + s * 0.86, y + s * 0.78)]
-    d.line(pts, fill=RED, width=6, joint="curve")
+    cv.polyline(pts, RED, 6)
     ax, ay = pts[-1]
-    d.polygon([(ax, ay), (ax - s * 0.16, ay - s * 0.02), (ax - s * 0.03, ay - s * 0.16)], fill=RED)
+    cv.polygon([(ax, ay), (ax - s * 0.16, ay - s * 0.02), (ax - s * 0.03, ay - s * 0.16)], RED)
 
 
-def icon_ukraine(d, x, y, s):
+def icon_ukraine(cv, x, y, s):
     # drone: body + four rotor discs
     cx, cy = x + s * 0.5, y + s * 0.52
     for dx, dy in [(-0.30, -0.26), (0.30, -0.26), (-0.30, 0.26), (0.30, 0.26)]:
         rx, ry = cx + s * dx, cy + s * dy
-        d.line([cx, cy, rx, ry], fill=INK, width=4)
-        d.ellipse([rx - s * 0.13, ry - s * 0.06, rx + s * 0.13, ry + s * 0.06], outline=INK, width=4)
-    d.rectangle([cx - s * 0.13, cy - s * 0.10, cx + s * 0.13, cy + s * 0.10], fill=INK)
-    d.ellipse([cx - s * 0.05, cy - s * 0.05, cx + s * 0.05, cy + s * 0.05], fill=RED)
+        cv.line(cx, cy, rx, ry, INK, 4)
+        cv.ellipse_outline(rx - s * 0.13, ry - s * 0.06, rx + s * 0.13, ry + s * 0.06,
+                           INK, 4, PANEL_BG)
+    cv.fill_rect(cx - s * 0.13, cy - s * 0.10, cx + s * 0.13, cy + s * 0.10, INK)
+    cv.ellipse(cx - s * 0.05, cy - s * 0.05, cx + s * 0.05, cy + s * 0.05, RED)
 
 
-def icon_huawei(d, x, y, s):
+def icon_huawei(cv, x, y, s):
     # microchip: body, core, pins
     bx0, by0, bx1, by1 = x + s * 0.24, y + s * 0.24, x + s * 0.76, y + s * 0.76
     for t in (0.34, 0.50, 0.66):
         px, py = x + s * t, y + s * t
-        d.line([px, y + s * 0.06, px, by0], fill=INK, width=4)
-        d.line([px, by1, px, y + s * 0.94], fill=INK, width=4)
-        d.line([x + s * 0.06, py, bx0, py], fill=INK, width=4)
-        d.line([bx1, py, x + s * 0.94, py], fill=INK, width=4)
-    d.rectangle([bx0, by0, bx1, by1], fill=INK)
-    d.rectangle([x + s * 0.40, y + s * 0.40, x + s * 0.60, y + s * 0.60], fill=RED)
+        cv.line(px, y + s * 0.06, px, by0, INK, 4)
+        cv.line(px, by1, px, y + s * 0.94, INK, 4)
+        cv.line(x + s * 0.06, py, bx0, py, INK, 4)
+        cv.line(bx1, py, x + s * 0.94, py, INK, 4)
+    cv.fill_rect(bx0, by0, bx1, by1, INK)
+    cv.fill_rect(x + s * 0.40, y + s * 0.40, x + s * 0.60, y + s * 0.60, RED)
 
 
-def icon_climate(d, x, y, s):
+def icon_climate(cv, x, y, s):
     # thermometer with red mercury
     tx = x + s * 0.44
-    d.rounded_rectangle([tx - s * 0.09, y + s * 0.06, tx + s * 0.09, y + s * 0.68],
-                        radius=s * 0.09, outline=INK, width=5)
-    d.ellipse([tx - s * 0.17, y + s * 0.58, tx + s * 0.17, y + s * 0.92], outline=INK, width=5)
-    d.rectangle([tx - s * 0.045, y + s * 0.34, tx + s * 0.045, y + s * 0.70], fill=RED)
-    d.ellipse([tx - s * 0.10, y + s * 0.65, tx + s * 0.10, y + s * 0.85], fill=RED)
+    cv.rounded_rect_outline(tx - s * 0.09, y + s * 0.06, tx + s * 0.09, y + s * 0.68,
+                            s * 0.09, INK, 5, PANEL_BG)
+    cv.ellipse_outline(tx - s * 0.17, y + s * 0.58, tx + s * 0.17, y + s * 0.92,
+                       INK, 5, PANEL_BG)
+    cv.fill_rect(tx - s * 0.045, y + s * 0.34, tx + s * 0.045, y + s * 0.70, RED)
+    cv.ellipse(tx - s * 0.10, y + s * 0.65, tx + s * 0.10, y + s * 0.85, RED)
     for t in (0.18, 0.32, 0.46):
-        d.line([tx + s * 0.13, y + s * t, tx + s * 0.26, y + s * t], fill=INK, width=4)
+        cv.line(tx + s * 0.13, y + s * t, tx + s * 0.26, y + s * t, INK, 4)
     # sun behind
     sx, sy = x + s * 0.76, y + s * 0.24
-    d.ellipse([sx - s * 0.11, sy - s * 0.11, sx + s * 0.11, sy + s * 0.11], fill=FLAME_Y)
+    cv.ellipse(sx - s * 0.11, sy - s * 0.11, sx + s * 0.11, sy + s * 0.11, FLAME_Y)
 
 
-def icon_space(d, x, y, s):
-    # rocket with red fin/flame
+def icon_space(cv, x, y, s):
+    # rocket with red fins and orange flame
     cx = x + s * 0.5
-    d.polygon([(cx, y + s * 0.04), (cx + s * 0.15, y + s * 0.30),
-               (cx + s * 0.15, y + s * 0.62), (cx - s * 0.15, y + s * 0.62),
-               (cx - s * 0.15, y + s * 0.30)], fill=INK)
-    d.ellipse([cx - s * 0.06, y + s * 0.26, cx + s * 0.06, y + s * 0.38], fill=BG)
-    d.polygon([(cx - s * 0.15, y + s * 0.50), (cx - s * 0.30, y + s * 0.74),
-               (cx - s * 0.15, y + s * 0.74)], fill=RED)
-    d.polygon([(cx + s * 0.15, y + s * 0.50), (cx + s * 0.30, y + s * 0.74),
-               (cx + s * 0.15, y + s * 0.74)], fill=RED)
-    d.polygon([(cx - s * 0.07, y + s * 0.98), (cx, y + s * 0.74), (cx + s * 0.07, y + s * 0.98)],
-              fill=FLAME_O)
+    cv.polygon([(cx, y + s * 0.04), (cx + s * 0.15, y + s * 0.30),
+                (cx + s * 0.15, y + s * 0.62), (cx - s * 0.15, y + s * 0.62),
+                (cx - s * 0.15, y + s * 0.30)], INK)
+    cv.ellipse(cx - s * 0.06, y + s * 0.26, cx + s * 0.06, y + s * 0.38, BG)
+    cv.polygon([(cx - s * 0.15, y + s * 0.50), (cx - s * 0.30, y + s * 0.74),
+                (cx - s * 0.15, y + s * 0.74)], RED)
+    cv.polygon([(cx + s * 0.15, y + s * 0.50), (cx + s * 0.30, y + s * 0.74),
+                (cx + s * 0.15, y + s * 0.74)], RED)
+    cv.polygon([(cx - s * 0.07, y + s * 0.98), (cx, y + s * 0.74), (cx + s * 0.07, y + s * 0.98)],
+               FLAME_O)
 
 
 ICONS = {
@@ -198,27 +414,28 @@ PANELS = [
 ]
 
 
-# --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Scene: Strait of Hormuz
-# --------------------------------------------------------------------------
-def tanker(d, x, y, scale, hull_col, burning):
+# ---------------------------------------------------------------------------
+def tanker(cv, x, y, scale, hull_col, burning):
     """Draw a tanker silhouette with its keel line at y."""
     hull_w, hull_h = 340 * scale, 34 * scale
     # hull (bow to the right)
-    d.polygon([(x, y - hull_h), (x + hull_w * 0.86, y - hull_h),
-               (x + hull_w, y - hull_h * 0.35), (x + hull_w * 0.94, y),
-               (x + hull_w * 0.08, y), (x, y - hull_h * 0.3)], fill=hull_col)
+    cv.polygon([(x, y - hull_h), (x + hull_w * 0.86, y - hull_h),
+                (x + hull_w, y - hull_h * 0.35), (x + hull_w * 0.94, y),
+                (x + hull_w * 0.08, y), (x, y - hull_h * 0.3)], hull_col)
     # deck line and cargo hatches
-    d.rectangle([x + hull_w * 0.10, y - hull_h - 8 * scale,
-                 x + hull_w * 0.62, y - hull_h], fill=hull_col)
+    cv.fill_rect(x + hull_w * 0.10, y - hull_h - 8 * scale,
+                 x + hull_w * 0.62, y - hull_h, hull_col)
     # bridge / superstructure at the stern (left)
-    d.rectangle([x + hull_w * 0.06, y - hull_h - 52 * scale,
-                 x + hull_w * 0.20, y - hull_h - 8 * scale], fill=hull_col)
-    d.rectangle([x + hull_w * 0.09, y - hull_h - 66 * scale,
-                 x + hull_w * 0.17, y - hull_h - 52 * scale], fill=hull_col)
+    cv.fill_rect(x + hull_w * 0.06, y - hull_h - 52 * scale,
+                 x + hull_w * 0.20, y - hull_h - 8 * scale, hull_col)
+    cv.fill_rect(x + hull_w * 0.09, y - hull_h - 66 * scale,
+                 x + hull_w * 0.17, y - hull_h - 52 * scale, hull_col)
     # mast amidships
-    d.line([x + hull_w * 0.45, y - hull_h - 8 * scale,
-            x + hull_w * 0.45, y - hull_h - 58 * scale], fill=hull_col, width=max(2, int(4 * scale)))
+    cv.line(x + hull_w * 0.45, y - hull_h - 8 * scale,
+            x + hull_w * 0.45, y - hull_h - 58 * scale,
+            hull_col, max(2, int(4 * scale)))
     if burning:
         fx = x + hull_w * 0.38
         fy = y - hull_h - 6 * scale
@@ -227,86 +444,84 @@ def tanker(d, x, y, scale, hull_col, burning):
                                  (0.60, -160, 46, SMOKE2), (0.70, -178, 52, SMOKE1),
                                  (0.82, -195, 58, SMOKE2)]:
             cx, cy = x + hull_w * sx, y + sy * scale
-            d.ellipse([cx - r * scale, cy - r * 0.62 * scale,
-                       cx + r * scale, cy + r * 0.62 * scale], fill=col)
+            cv.ellipse(cx - r * scale, cy - r * 0.62 * scale,
+                       cx + r * scale, cy + r * 0.62 * scale, col)
         # flames: layered teardrops
         for (dx, hgt, wid, col) in [(0.0, 120, 30, RED), (26, 150, 34, FLAME_O),
                                     (54, 105, 26, RED), (30, 92, 22, FLAME_Y),
                                     (8, 70, 18, FLAME_Y)]:
             cx = fx + dx * scale
-            d.polygon([(cx - wid * scale, fy), (cx, fy - hgt * scale),
-                       (cx + wid * scale, fy)], fill=col)
-            d.ellipse([cx - wid * scale, fy - wid * 0.5 * scale,
-                       cx + wid * scale, fy + wid * 0.5 * scale], fill=col)
+            cv.polygon([(cx - wid * scale, fy), (cx, fy - hgt * scale),
+                        (cx + wid * scale, fy)], col)
+            cv.ellipse(cx - wid * scale, fy - wid * 0.5 * scale,
+                       cx + wid * scale, fy + wid * 0.5 * scale, col)
 
 
-def draw_headline_scene(d):
+def draw_headline_scene(cv):
     x0, y0, x1, y1 = 36, 208, 988, 428
     # sky: two flat bands (deterministic gradient feel)
-    d.rectangle([x0, y0, x1, 350], fill=SKY_BOT)
-    d.rectangle([x0, y0, x1, 282], fill=SKY_TOP)
+    cv.fill_rect(x0, y0, x1, 350, SKY_BOT)
+    cv.fill_rect(x0, y0, x1, 282, SKY_TOP)
     # sea
-    d.rectangle([x0, 350, x1, y1], fill=SEA)
-    d.rectangle([x0, 350, x1, 358], fill=SEA_DARK)
+    cv.fill_rect(x0, 350, x1, y1, SEA)
+    cv.fill_rect(x0, 350, x1, 358, SEA_DARK)
     for i, wy in enumerate((374, 394, 412)):
         off = 60 if i % 2 else 0
         for wx in range(x0 + 40 + off, x1 - 60, 170):
-            d.line([wx, wy, wx + 52, wy], fill=(86, 122, 140), width=3)
+            cv.line(wx, wy, wx + 52, wy, WAVE, 3)
     # burning tanker (hero, left-centre) and intact tanker (right)
-    tanker(d, 120, 392, 0.92, SHIP, burning=True)
-    tanker(d, 618, 386, 0.66, SHIP2, burning=False)
-    d.rectangle([x0, y0, x1, y1], outline=BORDER, width=3)
+    tanker(cv, 120, 392, 0.92, SHIP, burning=True)
+    tanker(cv, 618, 386, 0.66, SHIP2, burning=False)
+    cv.rect_outline(x0, y0, x1, y1, BORDER, 3)
 
 
-# --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Panels
-# --------------------------------------------------------------------------
-def draw_panel(d, x, y, w, h, region, title):
-    d.rectangle([x, y, x + w, y + h], fill=PANEL_BG, outline=BORDER, width=2)
-    d.rectangle([x, y, x + 6, y + h], fill=RED)
+# ---------------------------------------------------------------------------
+def draw_panel(cv, x, y, w, h, region, title):
+    cv.fill_rect(x, y, x + w, y + h, PANEL_BG)
+    cv.rect_outline(x, y, x + w, y + h, BORDER, 2)
+    cv.fill_rect(x, y, x + 6, y + h, RED)
     pad = 16
     icon_s = 48
-    ICONS[region](d, x + pad + 4, y + 12, icon_s)
-    f_region = lib_bold(28)
-    d.text((x + pad + icon_s + 18, y + 22), region, font=f_region, fill=RED)
+    ICONS[region](cv, x + pad + 4, y + 12, icon_s)
+    draw_text(cv, x + pad + icon_s + 18, y + 22, region, "lb", 28, RED)
     # Title: start at 30px; shrink only as far as needed so the full
     # title fits the panel (no clipped words).
     size = 30
     while size > 20:
-        f_title = lib_bold(size)
-        lines = wrap(d, title, f_title, w - pad * 2 - 6)
+        lines = wrap_text(title, "lb", size, w - pad * 2 - 6)
         if len(lines) <= 4:
             break
         size -= 1
     ty = y + 62
     for ln in lines[:4]:
-        d.text((x + pad + 4, ty), ln, font=f_title, fill=INK)
+        draw_text(cv, x + pad + 4, ty, ln, "lb", size, INK)
         ty += size + 5
 
 
-# --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Main composition
-# --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 def build():
-    img = Image.new("RGB", (W, H), BG)
-    d = ImageDraw.Draw(img)
+    cv = Canvas(W, H, BG)
     cx = W // 2
 
     # ---- Masthead -------------------------------------------------------
-    d.rectangle([36, 14, 988, 16], fill=INK)
-    draw_spaced_centered(d, cx, 24, "THE WORLD IN ONE IMAGE", lib_bold(26), RED, 10)
-    draw_centered(d, cx, 54, "WEDNESDAY", dejavu_bold(80), INK)
-    draw_centered(d, cx, 130, "25 NOVEMBER 2026", dejavu_bold(70), INK)
-    d.rectangle([36, 196, 988, 200], fill=INK)
+    cv.fill_rect(36, 14, 988, 16, INK)
+    draw_spaced_centered(cv, cx, 24, "THE WORLD IN ONE IMAGE", "lb", 26, RED, 10)
+    draw_centered(cv, cx, 54, "WEDNESDAY", "db", 80, INK)
+    draw_centered(cv, cx, 130, "25 NOVEMBER 2026", "db", 70, INK)
+    cv.fill_rect(36, 196, 988, 200, INK)
 
     # ---- Headline scene + caption --------------------------------------
-    draw_headline_scene(d)
+    draw_headline_scene(cv)
     cap_y = 436
-    d.rectangle([36, cap_y, 44, 518], fill=RED)
-    d.text((60, cap_y + 2), "STRAIT OF HORMUZ", font=dejavu_bold(44), fill=INK)
-    d.text((60, cap_y + 54),
-           "Two oil tankers hit naval mines and burst into flames",
-           font=lib_regular(28), fill=INK)
+    cv.fill_rect(36, cap_y, 44, 518, RED)
+    draw_text(cv, 60, cap_y + 2, "STRAIT OF HORMUZ", "db", 44, INK)
+    draw_text(cv, 60, cap_y + 54,
+              "Two oil tankers hit naval mines and burst into flames",
+              "lr", 28, INK)
 
     # ---- Six panels ------------------------------------------------------
     panel_w, panel_h, gap = 309, 200, 10
@@ -315,11 +530,11 @@ def build():
         col, row = i % 3, i // 3
         px = 36 + col * (panel_w + gap)
         py = top + row * (panel_h + gap)
-        draw_panel(d, px, py, panel_w, panel_h, region, title)
+        draw_panel(cv, px, py, panel_w, panel_h, region, title)
 
     # ---- Bottom banner ---------------------------------------------------
     by0, by1 = 948, 1002
-    d.rectangle([36, by0, 988, by1], fill=RED)
+    cv.fill_rect(36, by0, 988, by1, RED)
     banner_lines = [
         "ALSO TODAY: Gaza strike kills Hamas security chief \u2022 "
         "Dell posts record AI-server sales",
@@ -327,20 +542,21 @@ def build():
         "Shenzhou-24 crew arrives at Tiangong",
     ]
     size = 23
-    while size > 12 and any(text_w(d, s, lib_bold(size)) > 936 for s in banner_lines):
+    while size > 12 and any(text_width("lb", size, s) > 936 for s in banner_lines):
         size -= 1
-    f_banner = lib_bold(size)
-    draw_centered(d, cx, by0 + 4, banner_lines[0], f_banner, (255, 255, 255))
-    draw_centered(d, cx, by0 + 29, banner_lines[1], f_banner, (255, 255, 255))
+    draw_centered(cv, cx, by0 + 4, banner_lines[0], "lb", size, WHITE)
+    draw_centered(cv, cx, by0 + 29, banner_lines[1], "lb", size, WHITE)
 
-    return img
+    return cv
 
 
 def main():
-    img = build()
-    os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
-    img.save(OUT_PATH, format="PNG", optimize=False)
-    print(f"wrote {OUT_PATH}: {img.size[0]}x{img.size[1]}")
+    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output"
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "entry.png")
+    cv = build()
+    write_png(out_path, W, H, cv.buf)
+    print(f"wrote {out_path}: {W}x{H}")
 
 
 if __name__ == "__main__":
